@@ -9,18 +9,14 @@ name: Push to Google Apps Script
 # 設定一個叫 CLASPRC_JSON 的 secret（`clasp login` 產生的 ~/.clasprc.json
 # 內容，base64 編碼後貼上，避免複製貼上時混進換行符號把 JSON 弄壞）。
 #
-# 【2026-09-22 新增時尚未確認的事】：這個 Apps Script 專案的 Web App
-# 部署，目前不確定是「@HEAD」（永遠對應最新程式碼，clasp push 完就直接
-# 生效）還是綁定「固定版本」的部署（delivery-gas-project 就踩過這個雷：
-# 固定版本的部署，光 push 不會反映上去，要另外執行
-# `clasp deploy -i <deployment id>` 才會真的更新，push 再多次都沒用，
-# 而且錯誤表現起來完全不像「沒生效」，很容易誤判成別的問題）。
-# 確認方式：在有登入這個 Apps Script 專案權限的環境執行
-# `clasp deployments` 列出所有部署，如果看到一個 deployment id 開頭
-# `AKfycb...`（不是 @HEAD），代表這是固定版本的部署，需要在下面補一個
-# `clasp deploy -i <那個 id> -d "自動部署 ..."` 的步驟（照抄
-# delivery-gas-project 的 clasp-push.yml 最後一步）；如果只有 @HEAD，
-# 現在這樣 push-only 就已經足夠，不用再加這一步。
+# 【2026-09-22 確認】：這個 Apps Script 專案的 Web App 部署，材霈平台
+# （`tsaipeilinebot` 的 `JOB_PORTAL_GAS_WEBAPP_URL` 環境變數）實際打的是
+# 綁定「固定版本」的部署（deployment id
+# AKfycbwi-j_mbnUDRFPKyEvL7arPv9UzHqpJLoNf9xHMOZTIf2yPN-ob5gDyFvwxKU63mIhVIA，
+# 對照 `clasp deployments` 列出的說明是「薪資補款：新增PDF存查單附件」那筆），
+# 不是 @HEAD——跟 delivery-gas-project 踩過的雷一樣，光 `clasp push` 不會
+# 反映到這個固定版本的部署上，一定要多一個 `clasp deploy -i` 步驟才會真的
+# 更新，詳見下面那一步。
 
 on:
   push:
@@ -47,3 +43,10 @@ jobs:
 
       - name: Push to Apps Script
         run: clasp push --force
+
+      - name: Deploy latest version to the live deployment
+        # 材霈平台呼叫的 Web App 網址綁定這個固定版本的部署（不是
+        # @HEAD），單純 push 不會反映到這個網址真正執行的程式碼，一定要
+        # 額外執行這一步。更新版本不會換掉它的網址，不用跟著改
+        # JOB_PORTAL_GAS_WEBAPP_URL 環境變數。
+        run: clasp deploy -i AKfycbwi-j_mbnUDRFPKyEvL7arPv9UzHqpJLoNf9xHMOZTIf2yPN-ob5gDyFvwxKU63mIhVIA -d "自動部署 $(date -u +%Y-%m-%dT%H:%M:%SZ)"
