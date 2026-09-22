@@ -376,6 +376,23 @@ function isValidWebhookSecret(e) {
   return constantTimeEquals(provided, expected);
 }
 
+// 跟 isValidAdminApiSecret() 保護同一組 ADMIN_API_SECRET，差別是這支給
+// doPost 用（2026-09-22 新增「補寄信」／財務部批次匯出 PDF 這兩個內部
+// 端點）——POST 請求的密鑰放在 JSON body 裡（requestData.admin_secret），
+// 不是 doGet 的網址參數，所以不能沿用 isValidAdminApiSecret() 讀
+// e.parameter 的做法。這兩個端點不是對外公開表單（不像 SUBMIT_SALARY
+// 只靠蜜罐擋機器人），會動到既有資料（重寄信、批次讀取全部已核准紀錄），
+// 一定要驗證密鑰，不能公開任何人都能打。
+function isValidAdminApiSecretFromBody(requestData) {
+  const expected = CONFIG.ADMIN_API_SECRET;
+  if (!expected) {
+    console.error('❌ 尚未設定 ADMIN_API_SECRET，為安全起見一律拒絕此請求！請至指令碼屬性設定後再啟用。');
+    return false;
+  }
+  const provided = (requestData && requestData.admin_secret) || '';
+  return constantTimeEquals(provided, expected);
+}
+
 // 驗證管理端查詢請求是否帶有正確的 admin_secret，避免同仁名單等內部資料被公開查詢
 function isValidAdminApiSecret(e) {
   const expected = CONFIG.ADMIN_API_SECRET;
@@ -453,6 +470,25 @@ function doPost(e) {
 
     if (requestType === 'REGISTER_EMPLOYEE') {
       const result = EmployeeRegistrationService.processRegistration(requestData);
+      return createJsonResponse(result);
+    }
+
+    // --- 補寄信／財務部批次匯出 PDF（2026-09-22 新增，見 HANDOFF.md）---
+    // 這兩個端點會動到既有資料（重寄通知信、批次讀取全部已核准補款紀錄），
+    // 不是對外公開表單，一定要驗證 admin_secret，沒帶對一律拒絕。
+    if (requestType === 'RESEND_SALARY_EMAIL') {
+      if (!isValidAdminApiSecretFromBody(requestData)) {
+        return createJsonResponse({ status: 'error', message: 'unauthorized' });
+      }
+      const result = SalaryWorkflowService.resendSalaryEmail(requestData.salary_id);
+      return createJsonResponse(result);
+    }
+
+    if (requestType === 'EXPORT_SALARY_PDFS') {
+      if (!isValidAdminApiSecretFromBody(requestData)) {
+        return createJsonResponse({ status: 'error', message: 'unauthorized' });
+      }
+      const result = SalaryWorkflowService.exportApprovedSalaryPdfsZip(requestData.start_date, requestData.end_date);
       return createJsonResponse(result);
     }
 

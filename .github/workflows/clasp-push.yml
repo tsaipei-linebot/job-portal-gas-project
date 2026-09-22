@@ -1,0 +1,49 @@
+name: Push to Google Apps Script
+
+# 合併到 main 分支後，自動用 clasp 把程式碼推送到真正的 Google Apps Script
+# 專案，不用再手動跑 `git pull && clasp push`。跟 tsaipeilinebot repo 底下
+# delivery-gas-project 那組自動化是同一套做法，設定步驟見 tsaipeilinebot
+# 專案的 HANDOFF.md「CI/CD 自動部署」章節。
+#
+# 需要先在 GitHub 這個 repo 的 Settings → Secrets and variables → Actions
+# 設定一個叫 CLASPRC_JSON 的 secret（`clasp login` 產生的 ~/.clasprc.json
+# 內容，base64 編碼後貼上，避免複製貼上時混進換行符號把 JSON 弄壞）。
+#
+# 【2026-09-22 新增時尚未確認的事】：這個 Apps Script 專案的 Web App
+# 部署，目前不確定是「@HEAD」（永遠對應最新程式碼，clasp push 完就直接
+# 生效）還是綁定「固定版本」的部署（delivery-gas-project 就踩過這個雷：
+# 固定版本的部署，光 push 不會反映上去，要另外執行
+# `clasp deploy -i <deployment id>` 才會真的更新，push 再多次都沒用，
+# 而且錯誤表現起來完全不像「沒生效」，很容易誤判成別的問題）。
+# 確認方式：在有登入這個 Apps Script 專案權限的環境執行
+# `clasp deployments` 列出所有部署，如果看到一個 deployment id 開頭
+# `AKfycb...`（不是 @HEAD），代表這是固定版本的部署，需要在下面補一個
+# `clasp deploy -i <那個 id> -d "自動部署 ..."` 的步驟（照抄
+# delivery-gas-project 的 clasp-push.yml 最後一步）；如果只有 @HEAD，
+# 現在這樣 push-only 就已經足夠，不用再加這一步。
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  clasp-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install clasp
+        run: npm install -g @google/clasp
+
+      - name: Restore clasp credentials
+        env:
+          CLASPRC_JSON_B64: ${{ secrets.CLASPRC_JSON }}
+        run: echo "$CLASPRC_JSON_B64" | base64 -d > ~/.clasprc.json
+
+      - name: Push to Apps Script
+        run: clasp push --force
