@@ -281,22 +281,34 @@ const SalaryWorkflowService = {
       lock.releaseLock();
     }
 
+    // 【修正】原本不管寄信實際成不成功，回覆給主管/申請人/其他主管的 LINE
+    // 訊息永遠都說「已自動寄出」——寄信失敗（例如收件人清單湊不出有效
+    // email、GmailApp 拋例外）只會印進 console.error/warn，沒有人看得到，
+    // 導致「已核准」但「沒收到信」的狀況完全沒有人知道要處理。改成先拿到
+    // 寄信的真實結果，三則 LINE 訊息都照實反映；寄信失敗時提示可以用
+    // 系統的「補寄信」功能重試（見 resendSalaryEmail()）。
+    let mailResult = { success: true, message: '' };
     if (isApproved && salaryRecord) {
       try {
-        EmailService.sendSalaryCompensationReport(salaryRecord);
+        mailResult = EmailService.sendSalaryCompensationReport(salaryRecord);
       } catch (mailErr) {
         console.error('發送薪資補款信件失敗:', mailErr);
+        mailResult = { success: false, message: mailErr.toString() };
       }
     }
-    
+
     const replyText = isApproved
-      ? `✅ 薪資補款單 [${salaryId}] 審核完成：已核准！\n系統已自動寄出正式 HTML 薪資補款報表與佐證圖檔至財會、主管與同仁信箱。`
+      ? (mailResult.success
+          ? `✅ 薪資補款單 [${salaryId}] 審核完成：已核准！\n系統已自動寄出正式 HTML 薪資補款報表與佐證圖檔至財會、主管與同仁信箱。`
+          : `⚠️ 薪資補款單 [${salaryId}] 審核完成：已核准，但通知信寄送失敗（${mailResult.message || '原因不明'}）。請到系統使用「補寄信」功能重試，或聯絡系統管理員確認。`)
       : `❌ 薪資補款單 [${salaryId}] 審核完成：已退回！`;
     LineService.replyTextMessage(event.replyToken, replyText);
-    
+
     if (applicantId && LINE_ID_REGEX.test(applicantId)) {
       const notifyText = isApproved
-        ? `🎉 您提交的薪資補款申請單 [${salaryId}] 已通過主管核准！\n詳細補款報表與附件已同步發信通知。`
+        ? (mailResult.success
+            ? `🎉 您提交的薪資補款申請單 [${salaryId}] 已通過主管核准！\n詳細補款報表與附件已同步發信通知。`
+            : `🎉 您提交的薪資補款申請單 [${salaryId}] 已通過主管核准！\n（通知信寄送發生問題，如需要書面報表請聯絡人資/財務協助補寄。）`)
         : `⚠️ 您提交的薪資補款申請單 [${salaryId}] 已被主管退回，請確認資料後重新提出。`;
       LineService.pushMessage(applicantId, [{ type: 'text', text: notifyText }]);
     }
@@ -305,7 +317,9 @@ const SalaryWorkflowService = {
     try {
       const allSupervisors = OrgService.getSupervisorsByApplicantUserId(applicantId, '');
       const syncText = isApproved
-        ? `✅ 【審核同步】薪資補款單 [${salaryId}] 已由其他主管核准！\n系統已自動寄出正式 HTML 薪資補款報表與佐證圖檔至財會、主管與同仁信箱。`
+        ? (mailResult.success
+            ? `✅ 【審核同步】薪資補款單 [${salaryId}] 已由其他主管核准！\n系統已自動寄出正式 HTML 薪資補款報表與佐證圖檔至財會、主管與同仁信箱。`
+            : `⚠️ 【審核同步】薪資補款單 [${salaryId}] 已由其他主管核准，但通知信寄送失敗，請到系統補寄或聯絡管理員。`)
         : `⚠️ 【審核同步】薪資補款單 [${salaryId}] 已由其他主管退回。`;
       allSupervisors.forEach(sup => {
         const cleanLineId = String(sup.lineUserId || '').replace(/[^a-zA-Z0-9_-]/g, '').trim();
@@ -316,6 +330,79 @@ const SalaryWorkflowService = {
     } catch (supSyncErr) {
       console.warn('同步通知其他主管審核結果失敗:', supSyncErr);
     }
+  },
+
+  /**
+   * 「補寄信」功能（2026-09-22 新增）：核准後寄信失敗時，讓有權限的同仁在
+   * 材霈平台網頁上手動重新觸發，不用聯絡工程師。只允許對「已核准」的
+   * 補款單補寄——尚未核准的本來就還不該有信，退回的已經從試算表刪除、
+   * 查不到。回傳結果讓呼叫端（材霈平台）直接顯示給使用者看。
+   */
+  resendSalaryEmail: function(salaryId) {
+    salaryId = String(salaryId || '').trim();
+    if (!salaryId) {
+      return { status: 'error', message: '缺少補款單號' };
+    }
+    const record = SalarySheetService.getFullRecordById(salaryId);
+    if (!record) {
+      return { status: 'error', message: '找不到這筆補款單資料，可能已被刪除或單號有誤。' };
+    }
+    if (record.reviewStatus !== '已核准') {
+      return { status: 'error', message: `這筆補款單目前狀態是「${record.reviewStatus || '尚未審核'}」，只有已核准的補款單能補寄通知信。` };
+    }
+    let mailResult;
+    try {
+      mailResult = EmailService.sendSalaryCompensationReport(record);
+    } catch (mailErr) {
+      console.error(`補寄薪資補款單 [${salaryId}] 信件失敗:`, mailErr);
+      return { status: 'error', message: `補寄失敗：${mailErr.toString()}` };
+    }
+    if (!mailResult.success) {
+      return { status: 'error', message: `補寄失敗：${mailResult.message || '原因不明'}` };
+    }
+    return { status: 'success', message: `已重新寄送通知信至：${mailResult.recipients}` };
+  },
+
+  /**
+   * 財務部專區「批次下載 PDF」功能（2026-09-22 新增）：依起訖日期（比對
+   * 「申請日期」欄位，這是唯一保證每筆都有填的日期欄位——付款日期是選填，
+   * 常常還沒填）撈出區間內所有「已核准」的補款單，各自用跟核准信附件
+   * 完全同一份排版邏輯（EmailService.buildSalaryPdfBlob）產生 PDF，
+   * 全部打包成一個 ZIP 回傳（材霈平台網頁一次點擊只能觸發一個檔案下載，
+   * 多筆各自一份 PDF 只能靠打包成單一 ZIP 檔案做到「一鍵下載」）。
+   * 個別記錄產生 PDF 失敗不會讓整批失敗，失敗的單號會列在回傳結果裡。
+   */
+  exportApprovedSalaryPdfsZip: function(startDate, endDate) {
+    startDate = String(startDate || '').trim();
+    endDate = String(endDate || '').trim();
+    if (!startDate || !endDate) {
+      return { status: 'error', message: '請提供起訖日期' };
+    }
+    const records = SalarySheetService.listApprovedRecordsInRange(startDate, endDate);
+    if (records.length === 0) {
+      return { status: 'error', message: '這個日期區間內沒有已核准的補款紀錄。' };
+    }
+    const pdfBlobs = [];
+    const failedIds = [];
+    records.forEach(record => {
+      try {
+        pdfBlobs.push(EmailService.buildSalaryPdfBlob(record));
+      } catch (pdfErr) {
+        console.error(`匯出補款單 [${record.salaryId}] PDF 失敗:`, pdfErr);
+        failedIds.push(String(record.salaryId));
+      }
+    });
+    if (pdfBlobs.length === 0) {
+      return { status: 'error', message: '所有紀錄的 PDF 都產生失敗，請稍後再試或聯絡系統管理員。' };
+    }
+    const zipBlob = Utilities.zip(pdfBlobs, `薪資補款存查單_${startDate}_${endDate}.zip`);
+    return {
+      status: 'success',
+      filename: zipBlob.getName(),
+      base64: Utilities.base64Encode(zipBlob.getBytes()),
+      count: pdfBlobs.length,
+      failedIds: failedIds
+    };
   }
 };
 
@@ -323,6 +410,90 @@ const SalaryWorkflowService = {
 // 2. 補款試算表服務 (SalarySheetService)
 // ==============================================================================
 const SalarySheetService = {
+  /**
+   * 把試算表一列資料整理成完整的補款紀錄物件（欄位對照跟
+   * updateSalaryReviewStatus() 回傳的形狀一致，2026-09-22 抽出來共用，
+   * 避免 getFullRecordById()／listApprovedRecordsInRange() 各自重複同一份
+   * 20 幾行的欄位對照，之後試算表欄位異動只要改這裡一個地方）。不含
+   * supervisorEmail／applicantEmail——那兩個欄位需要另外查「員工主管
+   * 組織表」，只有真的要寄信的情境（getFullRecordById()）才查，批次匯出
+   * PDF 用不到、可以省下這個查詢成本。
+   */
+  _buildRecordFromRow: function(data, i) {
+    return {
+      salaryId: data[i][0],            // A (1)
+      applyTimestamp: data[i][1],      // B (2)
+      applicantName: String(data[i][2] || '').trim(), // C (3)
+      applicantUserId: String(data[i][3] || '').trim(), // D (4)
+      name: data[i][4],                // E (5)
+      idCard: data[i][5],              // F (6)
+      vendor: data[i][6],              // G (7)
+      applyDate: data[i][7],           // H (8)
+      payDate: data[i][8],             // I (9)
+      deductMonth: data[i][9],         // J (10)
+      compensateMonth: data[i][10],    // K (11)
+      isClaimable: data[i][11],        // L (12)
+      payType: data[i][12],            // M (13)
+      totalEarnings: data[i][13],      // N (14)
+      totalDeductions: data[i][14],    // O (15)
+      netTotal: data[i][15],           // P (16)
+      notes: data[i][16],              // Q (17)
+      reviewStatus: String(data[i][17] || '').trim(), // R (18)
+      approvedSupervisor: data[i][18], // S (19)
+      approvedTime: data[i][19],       // T (20)
+      imageUrl: data[i][20] || '',     // U (21)
+      remitFee: Number(data[i][21]) || 0 // V (22)
+    };
+  },
+
+  /**
+   * 「補寄信」功能用：依單號查一筆完整紀錄（含 supervisorEmail／
+   * applicantEmail，寄信需要這兩個欄位）。查無資料回傳 null。
+   */
+  getFullRecordById: function(salaryId) {
+    const sheet = SpreadsheetService.getOrCreateSheet(CONFIG.SHEET_NAME_SALARY);
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim() === salaryId) {
+        const record = this._buildRecordFromRow(data, i);
+        let supervisorEmail = '';
+        try {
+          const supervisorList = OrgService.getSupervisorsByApplicantUserId(record.applicantUserId, record.applicantName);
+          if (supervisorList && supervisorList.length > 0) {
+            supervisorEmail = supervisorList.map(s => s.email).filter(Boolean).join(',');
+          }
+        } catch (orgErr) {
+          console.warn('查詢主管 Email 失敗 (略過以避免中斷):', orgErr);
+        }
+        record.supervisorEmail = supervisorEmail;
+        record.applicantEmail = this.findApplicantEmail(record.applicantName, record.applicantUserId);
+        return record;
+      }
+    }
+    return null;
+  },
+
+  /**
+   * 財務部專區批次匯出 PDF 用：依「申請日期」欄位（見
+   * SalaryWorkflowService.exportApprovedSalaryPdfsZip() 的說明，這是唯一
+   * 保證每筆都有填的日期欄位）篩出區間內所有「已核准」的紀錄。
+   * startDate／endDate 都是 "yyyy-MM-dd" 字串，含頭尾兩端。
+   */
+  listApprovedRecordsInRange: function(startDate, endDate) {
+    const sheet = SpreadsheetService.getOrCreateSheet(CONFIG.SHEET_NAME_SALARY);
+    const data = sheet.getDataRange().getValues();
+    const records = [];
+    for (let i = 1; i < data.length; i++) {
+      const reviewStatus = String(data[i][17] || '').trim();
+      if (reviewStatus !== '已核准') continue;
+      const applyDateStr = normalizeDateValue(data[i][7]);
+      if (applyDateStr && applyDateStr >= startDate && applyDateStr <= endDate) {
+        records.push(this._buildRecordFromRow(data, i));
+      }
+    }
+    return records;
+  },
+
   getSalaryRecord: function(salaryId) {
     const sheet = SpreadsheetService.getOrCreateSheet(CONFIG.SHEET_NAME_SALARY);
     const data = sheet.getDataRange().getValues();
@@ -489,6 +660,16 @@ function normalizeMonthValue(value) {
   return String(value).trim();
 }
 
+// 跟 normalizeMonthValue() 同樣的理由，但輸出完整日期（"yyyy-MM-dd"），
+// 給財務部專區的日期區間篩選用（SalarySheetService.listApprovedRecordsInRange()）。
+function normalizeDateValue(value) {
+  if (!value) return '';
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, 'Asia/Taipei', 'yyyy-MM-dd');
+  }
+  return String(value).trim();
+}
+
 // ==============================================================================
 // 3. 電子郵件報表發送服務 (EmailService)
 // ==============================================================================
@@ -523,9 +704,14 @@ const EmailService = {
     const recipientList = Array.from(recipientSet);
     const finalRecipientString = recipientList.join(',');
 
+    // 【修正】原本這裡找不到任何有效收件人時只印 console.warn 就直接
+    // return（沒有回傳值），呼叫端完全不知道寄信其實沒發生——改成回傳
+    // 明確的 {success:false, message} 讓呼叫端（handleSalaryPostback／
+    // resendSalaryEmail）可以照實告知使用者。
     if (!finalRecipientString) {
-      console.warn('⚠️ 未配置任何有效之收件人信箱，略過郵件發送。');
-      return;
+      const msg = '沒有配置任何有效的收件人信箱（財會/主管/申請人信箱皆無法取得）';
+      console.warn(`⚠️ ${msg}，略過郵件發送。`);
+      return { success: false, message: msg };
     }
 
     // 處理圖檔附件與內嵌 CID
@@ -689,8 +875,14 @@ const EmailService = {
       mailOptions.inlineImages = inlineImagesMap;
     }
 
-    GmailApp.sendEmail(finalRecipientString, subject, '', mailOptions);
+    try {
+      GmailApp.sendEmail(finalRecipientString, subject, '', mailOptions);
+    } catch (sendErr) {
+      console.error(`❌ 寄送薪資補款郵件失敗 (收件人：[${finalRecipientString}]):`, sendErr);
+      return { success: false, message: sendErr.toString() };
+    }
     console.log(`✉️ 成功發送薪資補款郵件至：[${finalRecipientString}] (含附件與內嵌圖檔)`);
+    return { success: true, message: '', recipients: finalRecipientString };
   },
 
   /**
