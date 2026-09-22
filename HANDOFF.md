@@ -40,13 +40,19 @@
   跟 `delivery-gas-project` 同一套做法，需要先設定好 `CLASPRC_JSON`
   這個 repository secret（步驟見 `tsaipeilinebot` 專案 `HANDOFF.md`
   「CI/CD 自動部署」章節，兩邊做法一致）。
-- **2026-09-22 尚未確認**：這個專案的 Web App 部署是「@HEAD」還是「固定
-  版本」——`delivery-gas-project` 當初踩過「固定版本部署，光 push 不會
-  生效，要另外 `clasp deploy -i <deployment id>`」這個雷。使用者需要在
-  有登入這個 Apps Script 專案權限的環境執行 `clasp deployments` 確認，
-  如果是固定版本，要回來請 Claude 在 `clasp-push.yml` 補上對應的
-  `clasp deploy -i ...` 步驟，不然以後 push 完 CI 顯示成功，但正式環境
-  其實沒有真的更新。
+- **2026-09-22 確認結果：是固定版本的部署，不是 @HEAD**——比對
+  `tsaipeilinebot` 的 `JOB_PORTAL_GAS_WEBAPP_URL` 環境變數（材霈平台
+  實際呼叫的網址）跟 `clasp deployments` 的清單，確認材霈平台打的是
+  deployment id `AKfycbwi-j_mbnUDRFPKyEvL7arPv9UzHqpJLoNf9xHMOZTIf2yPN-ob5gDyFvwxKU63mIhVIA`
+  （清單裡標註「薪資補款：新增PDF存查單附件」那筆）——`delivery-gas-project`
+  當初踩過的那個雷（固定版本部署，光 push 不會生效，要另外
+  `clasp deploy -i <deployment id>`）這裡真的發生了：9/22 稍早合併的
+  「修正薪資補款已核准但沒收到信＋補寄信＋財務部專區」那次，`clasp push`
+  CI 顯示成功，但正式環境其實沒有真的更新（因為當時 `CLASPRC_JSON`
+  也還沒設定，push 根本沒執行成功，兩個問題疊在一起）。已經在
+  `clasp-push.yml` 補上 `clasp deploy -i` 這一步（照抄
+  `delivery-gas-project` 的做法），之後合併到 main 都會自動更新到這個
+  固定部署，不用再手動處理。
 
 ## 指令碼屬性（只列名稱與用途，實際值不寫進 git）
 
