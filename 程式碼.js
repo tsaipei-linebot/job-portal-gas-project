@@ -36,7 +36,24 @@ const CONFIG = {
   // PIN 雜湊用的秘密字串（pepper），跟 PIN 一起下去算雜湊，避免雜湊值萬一外流時
   // 被人用「4 位數字只有 10000 種可能」預先算出對照表反查真實 PIN。
   // 需在「指令碼屬性」新增 PIN_PEPPER，值為一段不外流的隨機亂碼字串。
-  PIN_PEPPER: (_scriptProps.getProperty('PIN_PEPPER') || '').trim()
+  PIN_PEPPER: (_scriptProps.getProperty('PIN_PEPPER') || '').trim(),
+
+  // 薪資補款通知信改由材霈平台（Cloud Run）用 SMTP 寄出（2026-09-23）：
+  // Apps Script 的 GmailApp 寄信額度是「每個 Google 帳號每天 100 個
+  // 收件人」，一封通知信要寄給財會＋主管＋申請人就吃掉 3～5 個，每天
+  // 大約核准 20～25 筆就會撞到上限，撞到之後那天所有通知信都寄不出去
+  // （2026-09-23 實際發生）。這裡只把「寄出去」這一步委託給平台，信件
+  // 內容、PDF、寫試算表全部還是在這支 GAS 做。
+  //
+  // 兩個都要在「指令碼屬性」設定好才會生效；沒設定就自動退回原本的
+  // GmailApp 寄法（見 EmailService.sendSalaryCompensationReport），
+  // 所以這個改動不會因為忘了設定就讓通知信整個斷掉。
+  //   - PLATFORM_MAIL_URL：材霈平台的寄信端點，
+  //     例如 https://recruitment-bot-xxxx.asia-east1.run.app/api/job-portal/send-mail
+  //   - PLATFORM_MAIL_SECRET：跟平台的 JOB_PORTAL_MAIL_WEBHOOK_SECRET
+  //     環境變數設成同一個值。
+  PLATFORM_MAIL_URL: (_scriptProps.getProperty('PLATFORM_MAIL_URL') || '').trim(),
+  PLATFORM_MAIL_SECRET: (_scriptProps.getProperty('PLATFORM_MAIL_SECRET') || '').trim()
 };
 
 // 正確 LINE ID 驗證正則

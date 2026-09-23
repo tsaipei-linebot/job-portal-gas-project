@@ -875,6 +875,22 @@ const EmailService = {
       mailOptions.inlineImages = inlineImagesMap;
     }
 
+    // 2026-09-23：優先委託材霈平台用 SMTP 寄（見 CONFIG.PLATFORM_MAIL_URL
+    // 的說明——Apps Script 自己寄有「每天 100 個收件人」的硬上限）。
+    // 平台的設定沒填齊時自動退回原本的 GmailApp，不會因為漏設定就讓
+    // 通知信整個斷掉。
+    if (CONFIG.PLATFORM_MAIL_URL && CONFIG.PLATFORM_MAIL_SECRET) {
+      const platformResult = this.sendViaPlatform(
+        recipientList, subject, htmlBody, emailAttachments, inlineImagesMap
+      );
+      if (platformResult.success) {
+        console.log(`✉️ 成功發送薪資補款郵件至：[${finalRecipientString}]（材霈平台 SMTP）`);
+        return { success: true, message: '', recipients: finalRecipientString };
+      }
+      console.error(`❌ 材霈平台寄信失敗 (收件人：[${finalRecipientString}]):`, platformResult.message);
+      return { success: false, message: platformResult.message };
+    }
+
     try {
       GmailApp.sendEmail(finalRecipientString, subject, '', mailOptions);
     } catch (sendErr) {
@@ -883,6 +899,62 @@ const EmailService = {
     }
     console.log(`✉️ 成功發送薪資補款郵件至：[${finalRecipientString}] (含附件與內嵌圖檔)`);
     return { success: true, message: '', recipients: finalRecipientString };
+  },
+
+  /**
+   * 把組好的信件內容交給材霈平台的 /api/job-portal/send-mail 寄出
+   * （2026-09-23 新增）。附件與內嵌圖片都用 base64 傳，內嵌圖片要帶
+   * content_id，對應信件 HTML 裡的 <img src="cid:那個 id">（補款佐證
+   * 照片就是靠這個顯示在內文裡，不是只當附件）。
+   *
+   * 回傳 { success, message }：message 是平台回的白話失敗說明，呼叫端
+   * 直接接到主管的 LINE 訊息跟「補寄信」的結果訊息裡。
+   */
+  sendViaPlatform: function(recipientList, subject, htmlBody, attachmentBlobs, inlineImagesMap) {
+    const payload = {
+      to: recipientList,
+      subject: subject,
+      html: htmlBody,
+      attachments: (attachmentBlobs || []).map(blob => ({
+        filename: blob.getName(),
+        mime_type: blob.getContentType(),
+        base64: Utilities.base64Encode(blob.getBytes())
+      })),
+      inline_images: Object.keys(inlineImagesMap || {}).map(contentId => ({
+        content_id: contentId,
+        filename: inlineImagesMap[contentId].getName(),
+        mime_type: inlineImagesMap[contentId].getContentType(),
+        base64: Utilities.base64Encode(inlineImagesMap[contentId].getBytes())
+      }))
+    };
+
+    let response;
+    try {
+      response = UrlFetchApp.fetch(CONFIG.PLATFORM_MAIL_URL, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { 'X-Job-Portal-Mail-Secret': CONFIG.PLATFORM_MAIL_SECRET },
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+    } catch (err) {
+      return { success: false, message: `連線材霈平台寄信服務失敗：${err}` };
+    }
+
+    const code = response.getResponseCode();
+    if (code === 403) {
+      return { success: false, message: '材霈平台拒絕這次寄信請求（密鑰不符），請聯絡系統管理員確認設定。' };
+    }
+    let data;
+    try {
+      data = JSON.parse(response.getContentText());
+    } catch (parseErr) {
+      return { success: false, message: `材霈平台回應內容無法解析（HTTP ${code}）。` };
+    }
+    if (data.status === 'success') {
+      return { success: true, message: '' };
+    }
+    return { success: false, message: data.message || `材霈平台寄信失敗（HTTP ${code}）。` };
   },
 
   /**
