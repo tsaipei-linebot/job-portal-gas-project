@@ -108,3 +108,51 @@ handleSalaryPostback()`，主管在 LINE 按核准後，不管
 沒有寫測試的既有慣例），改動前後都用 `node --check <file>.js` 做語法
 檢查，功能是否正確要靠使用者在正式環境（或 Apps Script 編輯器的
 「執行」功能）實測確認。
+
+## 薪資補款通知信改由材霈平台寄出（2026-09-23）
+
+### 為什麼要改
+
+2026-09-23 同仁回報「補寄信按了沒有動作」，查出來是
+`Exception: 單日叫用下列服務的次數過多：email。`——**Apps Script 的寄信
+額度是「每個 Google 帳號每天 100 個收件人」**（這支 script 跑在一般
+Gmail 帳號上；Google Workspace 是 1500）。一封補款通知信要同時寄給
+財會＋審核主管＋申請人，一封就吃掉 3～5 個額度，所以**每天大約核准
+20～25 筆就會撞到上限，撞到之後那天所有通知信都寄不出去**（不只是手動
+補寄的那幾筆）。
+
+同一個信箱改走 SMTP 寄，是完全不同的一條額度（一般 Gmail 約 500、
+Workspace 約 2000），所以把「寄出去」這一步搬到材霈平台（Cloud Run）
+就能立刻拉高上限，之後要換成正規寄信服務也只要改平台那邊。
+
+### 改了什麼（刻意只搬「寄出去」這一步）
+
+**核准流程、寫試算表、產 PDF 存查單、組信件 HTML 全部維持在這支 GAS
+不變**，只有最後真正送出去那一下改成呼叫材霈平台：
+
+- `程式碼.js` 的 `CONFIG` 新增 `PLATFORM_MAIL_URL`／`PLATFORM_MAIL_SECRET`
+  兩個指令碼屬性。
+- `Project_Salary.js` 的 `EmailService` 新增 `sendViaPlatform()`：把
+  收件人、主旨、HTML、附件（base64）、內嵌圖片（base64＋content_id）
+  POST 到平台的 `/api/job-portal/send-mail`。
+- `sendSalaryCompensationReport()` 改成「兩個指令碼屬性都有設定就走平台，
+  否則退回原本的 `GmailApp.sendEmail`」——**漏設定不會讓通知信整個斷掉**，
+  而且萬一平台那邊有狀況，把指令碼屬性清掉就立刻回到原本的寄法。
+- 內嵌圖片（補款佐證照片）照舊用 `cid:salaryProofImg` 顯示在信件內文，
+  不是只當附件——平台端有對應處理，信件外觀跟原本一模一樣。
+
+### 上線前要設定的指令碼屬性
+
+Apps Script 專案 → 專案設定 → 指令碼屬性，新增兩筆：
+
+| 屬性名稱 | 值 |
+|---|---|
+| `PLATFORM_MAIL_URL` | `https://recruitment-bot-412901869672.asia-east1.run.app/api/job-portal/send-mail` |
+| `PLATFORM_MAIL_SECRET` | 跟平台 Cloud Run 的 `JOB_PORTAL_MAIL_WEBHOOK_SECRET` 環境變數設成同一個值 |
+
+平台那邊還要設定 SMTP 帳號密碼才會真的寄得出去，完整步驟見
+`tsaipeilinebot` 專案 `HANDOFF.md`「薪資補款通知信改由平台用 SMTP 寄」
+章節。
+
+改動前後都用 `node --check` 做語法檢查（這個 repo 沒有自動化測試的既有
+慣例），實際寄信效果要在正式環境實測確認。
